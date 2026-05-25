@@ -55,7 +55,11 @@ def generate(video: Path, language: str | None) -> None:
         extract_audio(video, audio)
 
         click.echo("[2/3] transcribing via Whisper API")
-        segments = transcribe(audio, language=language)
+        segments = transcribe(
+            audio,
+            language=language,
+            progress=lambda m: click.echo(f"      {m}"),
+        )
 
     click.echo(f"      got {len(segments)} segments")
     write_srt(segments, None, en_srt)

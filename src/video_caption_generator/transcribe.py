@@ -22,11 +22,19 @@ sentence:
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from openai import OpenAI
 
+from .audio import WAV_BYTES_PER_SECOND, split_audio, wav_duration_seconds
+
+
+MAX_UPLOAD_BYTES = 24 * 1024 * 1024
+"""Upload size at which we switch to chunked transcription. Whisper's hard cap
+is 25 MB; we stay under it with a safety margin."""
 
 PAUSE_GAP_SECONDS = 1.5
 """Silence between consecutive words that counts as a sentence boundary."""
@@ -59,16 +67,38 @@ class Segment:
     text: str
 
 
-def transcribe(audio_path: Path, language: str | None = None) -> list[Segment]:
+def transcribe(
+    audio_path: Path,
+    language: str | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> list[Segment]:
     """Transcribe audio and return one :class:`Segment` per sentence.
 
     The model is configurable via ``OPENAI_TRANSCRIBE_MODEL``
     (default: ``whisper-1``).
+
+    Files above :data:`MAX_UPLOAD_BYTES` (the Whisper 25 MB cap) are split into
+    consecutive chunks; each chunk's word timestamps are shifted by the chunk's
+    start offset and the chunks are merged back into one timeline before
+    sentence splitting, so the result is indistinguishable from a single pass.
+    ``progress`` is an optional callback for status messages.
     """
     client = OpenAI()
     model = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
-    with audio_path.open("rb") as f:
-        result = client.audio.transcriptions.create(
+
+    if audio_path.stat().st_size <= MAX_UPLOAD_BYTES:
+        result = _call_api(client, model, audio_path, language)
+        words = list(getattr(result, "words", None) or [])
+        if words:
+            return _words_to_sentence_segments(words)
+        return _from_segment_level([(result, 0.0)])
+
+    return _transcribe_chunked(client, model, audio_path, language, progress)
+
+
+def _call_api(client: OpenAI, model: str, path: Path, language: str | None):
+    with path.open("rb") as f:
+        return client.audio.transcriptions.create(
             model=model,
             file=f,
             response_format="verbose_json",
@@ -76,10 +106,47 @@ def transcribe(audio_path: Path, language: str | None = None) -> list[Segment]:
             language=language,
         )
 
-    words = list(getattr(result, "words", None) or [])
-    if words:
-        return _words_to_sentence_segments(words)
-    return _from_segment_level(result)
+
+def _transcribe_chunked(
+    client: OpenAI,
+    model: str,
+    audio_path: Path,
+    language: str | None,
+    progress: Callable[[str], None] | None,
+) -> list[Segment]:
+    chunk_seconds = max(1, MAX_UPLOAD_BYTES // WAV_BYTES_PER_SECOND)
+    with tempfile.TemporaryDirectory() as tmp:
+        chunks = split_audio(audio_path, Path(tmp), chunk_seconds)
+        if progress:
+            progress(f"audio exceeds 25 MB; split into {len(chunks)} chunks")
+
+        all_words: list = []
+        results_with_offset: list[tuple[object, float]] = []
+        offset = 0.0
+        for i, chunk in enumerate(chunks, 1):
+            if progress:
+                progress(f"transcribing chunk {i}/{len(chunks)}")
+            result = _call_api(client, model, chunk, language)
+            words = list(getattr(result, "words", None) or [])
+            all_words.extend(_offset_words(words, offset))
+            results_with_offset.append((result, offset))
+            offset += wav_duration_seconds(chunk)
+
+    if all_words:
+        return _words_to_sentence_segments(all_words)
+    return _from_segment_level(results_with_offset)
+
+
+def _offset_words(words: list, offset: float) -> list[dict]:
+    """Copy words into plain dicts with their timestamps shifted by ``offset``."""
+    return [
+        {
+            "word": _word_text(w),
+            "start": _word_start(w) + offset,
+            "end": _word_end(w) + offset,
+        }
+        for w in words
+    ]
 
 
 def _word_field(w, name: str, default):
@@ -214,13 +281,21 @@ def _words_to_sentence_segments(words: list) -> list[Segment]:
     return segments
 
 
-def _from_segment_level(result) -> list[Segment]:
+def _from_segment_level(results_with_offset: list[tuple[object, float]]) -> list[Segment]:
+    """Fallback path when no word-level timestamps are available.
+
+    Takes ``(result, offset)`` pairs so chunked transcriptions stitch onto one
+    timeline; a single-pass call passes one pair with a zero offset.
+    """
     segments: list[Segment] = []
-    for i, s in enumerate(getattr(result, "segments", []) or []):
-        start = float(getattr(s, "start", 0.0))
-        end = float(getattr(s, "end", start))
-        text = str(getattr(s, "text", "")).strip()
-        if not text:
-            continue
-        segments.append(Segment(index=i + 1, start=start, end=end, text=text))
+    for result, offset in results_with_offset:
+        for s in getattr(result, "segments", []) or []:
+            start = float(getattr(s, "start", 0.0)) + offset
+            end = float(getattr(s, "end", start)) + offset
+            text = str(getattr(s, "text", "")).strip()
+            if not text:
+                continue
+            segments.append(
+                Segment(index=len(segments) + 1, start=start, end=end, text=text)
+            )
     return segments
