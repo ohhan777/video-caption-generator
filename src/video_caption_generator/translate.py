@@ -11,11 +11,11 @@ from openai import OpenAI
 from .transcribe import Segment
 
 
-MAX_KOREAN_SENTENCES_PER_BLOCK = 2
-"""Cap on sentences per Korean SRT entry. When a translation exceeds this,
-:func:`cap_korean_sentences` splits the entry's time range proportionally
-by character count so a single English segment can map to several shorter
-Korean entries (e.g. when Whisper failed to punctuate a long passage)."""
+MAX_KOREAN_SENTENCES_PER_BLOCK = 1
+"""Cap on sentences per Korean SRT entry: one sentence per subtitle. When a
+translation has more sentences, :func:`cap_korean_sentences` splits the
+entry's time range proportionally by character count so each sentence becomes
+its own shorter Korean entry."""
 
 
 SYSTEM_PROMPT = (
