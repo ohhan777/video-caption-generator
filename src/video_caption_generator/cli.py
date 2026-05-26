@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from .audio import extract_audio
 from .burn import burn_subtitles
 from .download import download_command
+from .merge import merge_command
 from .subtitle import read_srt, write_srt
 from .transcribe import transcribe
 from .translate import cap_korean_sentences, translate_segments
@@ -213,6 +214,7 @@ def burn(
 
 cli.add_command(trim_command)
 cli.add_command(download_command)
+cli.add_command(merge_command)
 
 
 if __name__ == "__main__":
