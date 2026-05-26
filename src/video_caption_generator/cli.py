@@ -14,7 +14,7 @@ from .burn import burn_subtitles
 from .download import download_command
 from .merge import merge_command
 from .subtitle import read_srt, write_srt
-from .transcribe import transcribe
+from .transcribe import Segment, transcribe
 from .translate import cap_korean_sentences, translate_segments
 from .trim import trim_command
 
@@ -146,16 +146,48 @@ def translate(en_srt: Path, output: Path | None) -> None:
     "ko_srt", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
 def review(en_srt: Path, ko_srt: Path) -> None:
-    """Print a side-by-side review of two SRT files."""
-    en = {s.index: s for s in read_srt(en_srt)}
-    ko = {s.index: s for s in read_srt(ko_srt)}
-    for idx in sorted(en):
-        s = en[idx]
-        click.echo(f"#{idx}  [{s.start:7.2f} -> {s.end:7.2f}]")
-        click.echo(f"  EN: {s.text}")
-        ko_text = ko[idx].text if idx in ko else "(missing)"
-        click.echo(f"  KO: {ko_text}")
+    """Print a side-by-side review of two SRT files.
+
+    The Korean SRT is re-numbered by sentence splitting, so its indices no
+    longer line up with the English SRT. Each Korean entry is therefore paired
+    with the English entry it overlaps most in time, and a single English entry
+    may show several Korean lines.
+    """
+    en = read_srt(en_srt)
+    ko = read_srt(ko_srt)
+
+    def _best_en(k: Segment) -> Segment | None:
+        best, best_overlap = None, 0.0
+        for e in en:
+            overlap = min(k.end, e.end) - max(k.start, e.start)
+            if overlap > best_overlap:
+                best, best_overlap = e, overlap
+        return best
+
+    ko_by_en: dict[int, list[Segment]] = {e.index: [] for e in en}
+    unmatched: list[Segment] = []
+    for k in ko:
+        match = _best_en(k)
+        if match is None:
+            unmatched.append(k)
+        else:
+            ko_by_en[match.index].append(k)
+
+    for e in en:
+        click.echo(f"#{e.index}  [{e.start:7.2f} -> {e.end:7.2f}]")
+        click.echo(f"  EN: {e.text}")
+        matches = ko_by_en[e.index]
+        if matches:
+            for k in matches:
+                click.echo(f"  KO: {k.text}")
+        else:
+            click.echo("  KO: (missing)")
         click.echo("")
+
+    if unmatched:
+        click.echo("Korean entries with no overlapping English entry:")
+        for k in unmatched:
+            click.echo(f"  [{k.start:7.2f} -> {k.end:7.2f}] {k.text}")
 
 
 @cli.command()
