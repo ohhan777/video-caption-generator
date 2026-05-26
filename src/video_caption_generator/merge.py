@@ -19,7 +19,7 @@ from pathlib import Path
 
 import click
 
-from .audio import get_ffmpeg
+from .audio import get_ffmpeg, has_audio_stream, media_duration_seconds
 
 
 def _probe_resolution_fps(video_path: Path) -> tuple[int, int, float]:
@@ -80,20 +80,37 @@ def _merge_reencode(
 ) -> None:
     ffmpeg = get_ffmpeg()
     width, height, fps = _probe_resolution_fps(inputs[0])
+    n = len(inputs)
+    has_audio = [has_audio_stream(p) for p in inputs]
 
     cmd: list[str] = [ffmpeg, "-y"]
     for p in inputs:
         cmd += ["-i", str(p)]
 
-    n = len(inputs)
+    # The concat filter needs every segment to carry an audio stream. For any
+    # silent input, feed an anullsrc track sized to that clip's duration; its
+    # ffmpeg input index follows the video inputs.
+    silence_input: dict[int, int] = {}
+    next_input = n
+    for i, p in enumerate(inputs):
+        if not has_audio[i]:
+            cmd += [
+                "-f", "lavfi",
+                "-t", f"{media_duration_seconds(p):.3f}",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ]
+            silence_input[i] = next_input
+            next_input += 1
+
     steps: list[str] = []
     for i in range(n):
         steps.append(
             f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}[v{i}];"
         )
+        audio_src = i if has_audio[i] else silence_input[i]
         steps.append(
-            f"[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];"
+            f"[{audio_src}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];"
         )
     pairs = "".join(f"[v{i}][a{i}]" for i in range(n))
     filter_complex = "".join(steps) + f"{pairs}concat=n={n}:v=1:a=1[outv][outa]"

@@ -1,6 +1,7 @@
 """Extract audio from a video file using a bundled ffmpeg binary."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,6 +17,29 @@ Used to convert between WAV file size and audio duration without ffprobe."""
 
 def get_ffmpeg() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def _ffmpeg_banner(video_path: Path) -> str:
+    """ffmpeg's stderr probe output for a file (imageio-ffmpeg ships no ffprobe)."""
+    return subprocess.run(
+        [get_ffmpeg(), "-i", str(video_path)],
+        capture_output=True,
+        text=True,
+    ).stderr
+
+
+def has_audio_stream(video_path: Path) -> bool:
+    """Whether the file has at least one audio stream."""
+    return bool(re.search(r"Stream #\d+:\d+.*: Audio:", _ffmpeg_banner(video_path)))
+
+
+def media_duration_seconds(video_path: Path) -> float:
+    """Container duration in seconds, parsed from ffmpeg's banner (0.0 if unknown)."""
+    m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", _ffmpeg_banner(video_path))
+    if not m:
+        return 0.0
+    h, mn, s = m.groups()
+    return int(h) * 3600 + int(mn) * 60 + float(s)
 
 
 def extract_audio(video_path: Path, audio_path: Path) -> Path:

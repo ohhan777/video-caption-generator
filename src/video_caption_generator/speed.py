@@ -13,7 +13,7 @@ from pathlib import Path
 
 import click
 
-from .audio import get_ffmpeg
+from .audio import get_ffmpeg, has_audio_stream
 
 
 def _atempo_chain(rate: float) -> str:
@@ -48,21 +48,29 @@ def change_speed(
     ffmpeg = get_ffmpeg()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    filter_complex = (
-        f"[0:v]setpts=PTS/{rate:g}[v];"
-        f"[0:a]{_atempo_chain(rate)}[a]"
-    )
-    cmd = [
-        ffmpeg, "-y",
-        "-i", str(video_path),
-        "-filter_complex", filter_complex,
-        "-map", "[v]",
-        "-map", "[a]",
+    cmd = [ffmpeg, "-y", "-i", str(video_path)]
+    if has_audio_stream(video_path):
+        filter_complex = (
+            f"[0:v]setpts=PTS/{rate:g}[v];"
+            f"[0:a]{_atempo_chain(rate)}[a]"
+        )
+        cmd += [
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "[a]",
+            "-c:a", "aac",
+            "-b:a", "192k",
+        ]
+    else:
+        # silent video: re-time the picture only, no audio stream to emit
+        cmd += [
+            "-filter:v", f"setpts=PTS/{rate:g}",
+            "-an",
+        ]
+    cmd += [
         "-c:v", "libx264",
         "-preset", preset,
         "-crf", str(crf),
-        "-c:a", "aac",
-        "-b:a", "192k",
         "-movflags", "+faststart",
         "-loglevel", "error",
         "-stats",
