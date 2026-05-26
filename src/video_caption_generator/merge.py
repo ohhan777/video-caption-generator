@@ -82,25 +82,28 @@ def _merge_reencode(
     width, height, fps = _probe_resolution_fps(inputs[0])
     n = len(inputs)
     has_audio = [has_audio_stream(p) for p in inputs]
+    any_audio = any(has_audio)
 
     cmd: list[str] = [ffmpeg, "-y"]
     for p in inputs:
         cmd += ["-i", str(p)]
 
     # The concat filter needs every segment to carry an audio stream. For any
-    # silent input, feed an anullsrc track sized to that clip's duration; its
-    # ffmpeg input index follows the video inputs.
+    # silent input (when at least one other input has audio), feed an anullsrc
+    # track sized to that clip's duration; its ffmpeg input index follows the
+    # video inputs. If every input is silent, drop audio entirely instead.
     silence_input: dict[int, int] = {}
     next_input = n
-    for i, p in enumerate(inputs):
-        if not has_audio[i]:
-            cmd += [
-                "-f", "lavfi",
-                "-t", f"{media_duration_seconds(p):.3f}",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-            ]
-            silence_input[i] = next_input
-            next_input += 1
+    if any_audio:
+        for i, p in enumerate(inputs):
+            if not has_audio[i]:
+                cmd += [
+                    "-f", "lavfi",
+                    "-t", f"{media_duration_seconds(p):.3f}",
+                    "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                ]
+                silence_input[i] = next_input
+                next_input += 1
 
     steps: list[str] = []
     for i in range(n):
@@ -108,22 +111,30 @@ def _merge_reencode(
             f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}[v{i}];"
         )
-        audio_src = i if has_audio[i] else silence_input[i]
-        steps.append(
-            f"[{audio_src}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];"
-        )
-    pairs = "".join(f"[v{i}][a{i}]" for i in range(n))
-    filter_complex = "".join(steps) + f"{pairs}concat=n={n}:v=1:a=1[outv][outa]"
+        if any_audio:
+            audio_src = i if has_audio[i] else silence_input[i]
+            steps.append(
+                f"[{audio_src}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];"
+            )
+
+    if any_audio:
+        pairs = "".join(f"[v{i}][a{i}]" for i in range(n))
+        filter_complex = "".join(steps) + f"{pairs}concat=n={n}:v=1:a=1[outv][outa]"
+        maps = ["-map", "[outv]", "-map", "[outa]"]
+        audio_args = ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        pairs = "".join(f"[v{i}]" for i in range(n))
+        filter_complex = "".join(steps) + f"{pairs}concat=n={n}:v=1:a=0[outv]"
+        maps = ["-map", "[outv]"]
+        audio_args = ["-an"]
 
     cmd += [
         "-filter_complex", filter_complex,
-        "-map", "[outv]",
-        "-map", "[outa]",
+        *maps,
         "-c:v", "libx264",
         "-preset", preset,
         "-crf", str(crf),
-        "-c:a", "aac",
-        "-b:a", "192k",
+        *audio_args,
         "-movflags", "+faststart",
         "-loglevel", "error",
         "-stats",
